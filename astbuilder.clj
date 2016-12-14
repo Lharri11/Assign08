@@ -1,99 +1,127 @@
-(ns minilang.astbuilder
+(ns minilang.codegen
   (:require [minilang.lexer :as lexer])
+  (:require [minilang.node :as node])
   (:require [minilang.parser2 :as p])
   (:require [minilang.prettyprint :as pp])
-  (:require [minilang.node :as node]))
+  (:require [minilang.astbuilder :as ast])
+  (:require [minilang.scope :as s])
+  (:require [minilang.analyzer :as analyzer]))
 
-; Forward declaration for the build-ast function, useful if you
-; define any helper functions that need to call build-ast.
-;
-(declare build-ast)
+(declare generate-code)
 
-; Flatten a :statement_list node.
-; The resulting AST node should have the ASTs for the statements
-; that are part of the statement list as immediate children.
-;
-; Parameters:
-;   node - a :statement_list parse node
-;
-; Returns: the statement list as an AST, with child statements
-; as immediate children
-;
-(defn flatten-statement-list [node]
-  (loop [x node
-         acc []]
-    (if (= (node/num-children x) 1)
-      (node/make-node :statement_list (conj acc (build-ast (node/get-child x 0))))
-      (recur (node/get-child x 1) (conj acc (build-ast (node/get-child x 0)))))))
+; Recursively generate code for all children of given augmented AST node.
+(defn recur-on-children [aast]
+  (loop [nodes (node/children aast)]
+    (if (not (empty? nodes))
+      (do
+        (generate-code (first nodes) "")
+        (recur (rest nodes))))))
 
-; Returns an AST node whose symbol is the same as the parse node,
-; and whose children are ASTs constructed from the children of the
-; parse node.
-;
-; Parameters:
-;    node - a parse node
-;
-; Returns: an AST node (as described above)
-;
-(defn recur-on-children [node]
-  (node/make-node (:symbol node) (map build-ast (node/children node))))
-
-;; 
-;; Build-Ast Helper F
-;;
-(defn primary-helper [node]
- (if (= (node/num-children node) 1)
-   (build-ast (node/get-child node 0))
-   (build-ast (node/get-child node 1))))
-
-(defn if-while-helper [node]
- (node/make-node (:symbol node) [(build-ast (node/get-child node 2)) (build-ast (node/get-child node 5))]))
+(defn help-expression-statement [aast]
+  (generate-code (node/get-child aast 0) "")
+  (if (node/has-prop? aast :last)
+    (do
+    (println "\tsyscall $println")
+    (println "\tpop"))
+    (println "\tpop")))
   
-   
-; Build an Abstract Syntax Tree (AST) from the specified
-; parse tree.
-;
-; Parameters:
-;    node - a parse tree
-;
-; Returns: the abstract syntax tree representation of the parse tree.
-;
-(defn build-ast [node]
-  (case (:symbol node)
-    :unit (recur-on-children node)
-    :statement_list (flatten-statement-list node)
-    :statement (build-ast(node/get-child node 0))
-    :var_decl_statement (node/make-node :var_decl_statement [(node/get-child node 1)])
-    :expression_statement (node/make-node :expression_statement [(build-ast (node/get-child node 0))])                    
-    :primary (primary-helper node)
-    :if_statement (if-while-helper node)
-    :while_statement (if-while-helper node)
-    :op_assign (recur-on-children node) 	
-    :op_plus (recur-on-children node) 	
-    :op_minus (recur-on-children node) 	
-    :op_mul (recur-on-children node) 	
-    :op_div (recur-on-children node) 	
-    :op_exp (recur-on-children node) 	
-    :op_lte (recur-on-children node) 	
-    :op_lt (recur-on-children node) 	
-    :op_gte (recur-on-children node)
-    :op_gt (recur-on-children node)
-    :op_eq (recur-on-children node)
-    :op_neq (recur-on-children node) 	
+(defn help-operator [aast ins]
+  (recur-on-children aast)
+  (println ins))
+
+(defn help-op-assign [aast]
+  (do
+  (generate-code (node/get-child aast 1) "")
+  (println (str "\tdup\n\tstlocal " (node/get-prop (node/get-child aast 0) :regnum)))))
+
+(defn help-literal [aast]
+  (let [literal-val (:value aast)]
+    (println (str "\tldc_i " literal-val ))))  
+  
+(defn help-identifier [aast]
+  (println (str "\tldlocal " (node/get-prop aast :regnum))))
+
+(defn help-if-statement [aast]
+  (new-label)
+  (invert-comparison aast)
+  (generate-code (node/get-child aast 0) "")
+  (generate-code (node/get-child aast 1) ""))
+
+
+(defn generate-code [aast ontrue]
+  ;(println (str "; at " (:symbol aast)))
+  (case (:symbol aast)
+    :statement_list (recur-on-children aast)
     
-    ; The default case just leaves the parse node unchanged.
-    ; This is the correct behavior for identifiers, int literals,
-    ; and string literals
-    node))
+    ; TODO: handle other kinds of AST nodes
+    :expression_statement (help-expression-statement aast)
+    :int_literal (help-literal aast)
+    :str_literal (help-literal aast)
+    :identifier (help-identifier aast)
+   
+    :op_assign (help-op-assign aast) 	
+    :op_plus (help-operator aast "\tadd") 	
+    :op_minus (help-operator aast "\tsub") 	
+    :op_mul (help-operator aast "\tmul") 	
+    :op_div (help-operator aast "\tdiv") 	
+    :op_exp (help-operator aast "\texp") 	
+    :op_lte (help-operator aast "\tjlte") 	
+    :op_lt (help-operator aast "\tjlt") 	
+    :op_gte (help-operator aast "\tjgte")
+    :op_gt (help-operator aast "\tjgt")
+    :op_eq (help-operator aast "\tje")
+    :op_neq (help-operator aast "\tjne") 	
+    
+    ; Default case: do nothing
+    ;(println (str "; ignored " (:symbol aast)))
+    nil
+    ))
+
+; Generate a label
+(defn new-label []
+  (str (gensym)))
+
+(def inverted-comparison-ops
+  {:op_je :op_jne,
+   :op_jne :op_je,
+   :op_lt :op_gte,
+   :op_gte :op_lt,
+   :op_lte :op_gt,
+   :op_gt :op_lte})
+
+(defn invert-comparison [aast]
+  ;(println "; Inverting comparison " (:symbol aast))
+  (if (not (contains? inverted-comparison-ops (:symbol aast)))
+    (throw (RuntimeException. (str (:symbol aast) " expression is not a condition?")))
+    (node/make-node-with-props (get inverted-comparison-ops (:symbol aast)) (:value aast) (:props aast))))
+
+
+(defn compile-unit [unit]
+  (let [stmt-list (node/get-child unit 0)
+        nlocals (node/get-prop stmt-list :nlocals)]
+    (do
+      ; This is the program entry point
+      (println "main:")
+      ; Reserve space for local variables
+      (println (str "\tenter 0, " nlocals))
+      ; Generate code for the top-level statement list
+      (generate-code stmt-list "")
+      ; Emit code to return cleanly (to exit the program)
+      (println "\tldc_i 0")
+      (println "\tret"))))
+
 
 ; ----------------------------------------------------------------------
-; Testing
+; Testing:
+; Edit testprog, then reload this file, then execute
+;
+;   (compile-unit aast)
+;
+; in a REPL.
 ; ----------------------------------------------------------------------
 
-(def testprog "var a; a := 3*4;")
-;(def testprog "a * (b + 3);")
-;(def testprog "while (a <= b) { c; d*e*4; }")
-;(def testprog "if (x != 4) { y := z*3; }")
-
+;(def testprog "var a; a := 4 * 5; a;")
+(def testprog "var a; var b; var c; b := 6; c := 3; a := b*c;")
 (def parse-tree (p/parse (lexer/token-sequence (lexer/create-lexer (java.io.StringReader. testprog)))))
-(def ast (build-ast parse-tree))
+(def ast (ast/build-ast parse-tree))
+(def aast (analyzer/augment-ast ast (s/create-scope)))
